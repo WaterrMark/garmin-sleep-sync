@@ -1,32 +1,60 @@
-name: Sync Garmin sleep to Notion
+name: Sync Garmin to Notion
 on:
   schedule:
-    # Daily sync stays at 3 days. A larger window is a manual run only.
+    # Daily sync stays on the last 3 days. Full history is a manual run only.
     - cron: "0 13 * * *"
   workflow_dispatch:
     inputs:
-      SYNC_DAYS:
-        description: "Past days to sync. Scheduled runs ignore this and stay at 3. Use 60 for a one-time backfill."
+      mode:
+        description: "Incremental uses the days below. Full history asks Garmin for everything it still has and ignores the day count."
+        required: true
+        default: "Incremental (recent days)"
+        type: choice
+        options:
+          - Incremental (recent days)
+          - Full history
+      datasets:
+        description: "What to sync"
+        required: true
+        default: All
+        type: choice
+        options:
+          - All
+          - Sleep
+          - Activities
+          - Daily metrics
+      sync_days:
+        description: "Incremental only. Number of days to sync. Scheduled runs stay at 3. Ignored for full history. Use 60 to refresh the last 60 days."
         required: false
         default: "3"
         type: string
+concurrency:
+  group: garmin-notion-sync
+  cancel-in-progress: false
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: |
-          echo "SYNC_DAYS=${SYNC_DAYS}"
-          python sync_sleep.py
+      - name: Sync sleep, activities, and daily metrics
+        run: |
+          echo "mode=${SYNC_MODE} datasets=${DATASETS} sync_days=${SYNC_DAYS}"
+          python sync_garmin.py
         env:
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           GARMIN_TOKEN_B64: ${{ secrets.GARMIN_TOKEN_B64 }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_SLEEP_DB: ${{ secrets.NOTION_SLEEP_DB }}
-          # Cron events have no inputs, so this falls back to 3. A manual run uses the input.
-          SYNC_DAYS: ${{ inputs.SYNC_DAYS || '3' }}
+          NOTION_ACTIVITIES_DB: ${{ secrets.NOTION_ACTIVITIES_DB }}
+          NOTION_DAILY_DB: ${{ secrets.NOTION_DAILY_DB }}
+          NOTION_PARENT_PAGE: ${{ secrets.NOTION_PARENT_PAGE }}
+          # Cron has no inputs, so mode stays incremental and the window stays 3 days.
+          SYNC_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'incremental' }}
+          DATASETS: ${{ github.event_name == 'workflow_dispatch' && inputs.datasets || 'all' }}
+          SYNC_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.sync_days || '3' }}
