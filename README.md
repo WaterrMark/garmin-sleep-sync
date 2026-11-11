@@ -12,17 +12,17 @@ The automatic run stays small. Once a day it refreshes the last 3 days. A full h
 
 ## What happens every day
 
-GitHub Actions runs **Sync Garmin to Notion** at 13:00 UTC.
+GitHub Actions runs **Sync Garmin to Notion** at 13:00 UTC (21:00 in Hong Kong).
 
 That run is incremental:
 
-- **Sleep** is the last 3 nights, ending yesterday. Today is skipped because the current night is often still in progress. This is the same window the sleep sync already used.
+- **Sleep** is the last 3 nights, including today. Garmin dates a completed night on the morning you wake, so last night's sleep is stored on today's date, the same day as that night's HRV. A night with no recorded sleep is skipped and does not create a page.
 - **Activities** are anything that started in the last 3 days, including today, so a morning workout shows up the same day.
 - **Daily metrics** are today and the previous 2 days. Today's step count updates on the next runs, and yesterday is written again after it has settled.
 
 You do not need to do anything for this daily run once the secrets below are saved.
 
-Dates follow the GitHub runner clock, which is UTC.
+Dates follow the GitHub runner clock, which is UTC. At 13:00 UTC that date is the same calendar day as Hong Kong.
 
 ## One-time setup
 
@@ -81,7 +81,7 @@ Do this once, after the incremental run above has created the databases.
 What "full history" means:
 
 - **Activities:** every activity Garmin still returns, newest first, until the list runs out. There is no year cutoff.
-- **Sleep and daily metrics:** every month from the latest day back through January 2007, which is as far back as Garmin Connect's daily history goes. Sleep stops at yesterday. If an activity on the account is older than January 2007, that activity's date becomes the far end of the walk. Months with no real data are not written to Notion.
+- **Sleep and daily metrics:** every month from today back through January 2007, which is as far back as Garmin Connect's daily history goes. Sleep includes today when Garmin has a completed night for that date. If an activity on the account is older than January 2007, that activity's date becomes the far end of the walk. Months with no real data are not written to Notion.
 
 Empty stretches are fine. A month you did not wear the watch does not become a stack of blank pages, and it does not stop the walk. The walk still checks the older months.
 
@@ -92,7 +92,7 @@ This is the same idea as the earlier sleep backfill, and it now covers whichever
 1. **Actions → Sync Garmin to Notion → Run workflow**.
 2. Set **mode** to **Incremental (recent days)**.
 3. Set **datasets** to the data you want.
-4. Set **sync_days**. `60` refreshes the last 60 days. Sleep still ends yesterday. Activities and daily metrics include today.
+4. Set **sync_days**. `60` refreshes the last 60 days, including today. Sleep still skips a night that has no recorded sleep. Activities and daily metrics include today as well.
 
 The scheduled run does not read this number. It stays at 3.
 

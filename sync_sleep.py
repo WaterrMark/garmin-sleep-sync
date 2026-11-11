@@ -4,10 +4,12 @@ Garmin -> Notion sleep sync.
 Pulls sleep from Garmin Connect and writes it into the "Sleep (Garmin)" database.
 Safe to run repeatedly: it updates an existing night rather than creating duplicates.
 
-Incremental runs (the daily default) start at yesterday and go back SYNC_DAYS
-nights (default 3). Today is left out because the current night is often unfinished.
-Full history (SYNC_MODE=backfill) walks each month back through 2007, or earlier
-if an activity on the account is older, and writes every night Garmin still returns.
+Incremental runs (the daily default) include today and go back SYNC_DAYS
+nights (default 3). Garmin dates a completed night on the wake morning, so
+today is last night's sleep. A night with no recorded sleep is skipped.
+Full history (SYNC_MODE=backfill) walks each month from today back through
+2007, or earlier if an activity on the account is older, and writes every
+night Garmin still returns.
 
 Reads everything from environment variables (set as GitHub secrets):
     GARMIN_EMAIL / GARMIN_PASSWORD or GARMIN_TOKEN_B64
@@ -220,10 +222,9 @@ def _sync_sleep_window(garmin, notion, database_id, today, days):
 def _sync_sleep_history(garmin, notion, database_id, today, oldest_activity):
     cache = load_key_index(notion, database_id, "Date")
     floor = history_floor(oldest_activity)
-    cap = today - timedelta(days=1)
     created = updated = 0
-    print(f"Sleep history {floor.isoformat()} through {cap.isoformat()}", flush=True)
-    for start, end in iter_months(cap, floor):
+    print(f"Sleep history {floor.isoformat()} through {today.isoformat()}", flush=True)
+    for start, end in iter_months(today, floor):
         print(f"Sleep {start:%Y-%m}", flush=True)
         for record in fetch_sleep_records(garmin, start, end, pause=SLEEP_BACKFILL_PAUSE):
             result = _upsert_night(
