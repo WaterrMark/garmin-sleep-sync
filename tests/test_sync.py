@@ -56,13 +56,18 @@ class EnvCase(unittest.TestCase):
 
 
 class WindowTests(unittest.TestCase):
-    def test_sleep_dates_match_the_original_offsets(self):
-        today = date(2024, 5, 4)
+    def test_sleep_dates_include_the_wake_day(self):
+        """A finished night is dated on the morning it ends, same as HRV."""
+        today = date(2026, 11, 11)
         self.assertEqual(
             incremental_sleep_dates(today, 3),
-            [date(2024, 5, 3), date(2024, 5, 2), date(2024, 5, 1)],
+            [date(2026, 11, 11), date(2026, 11, 10), date(2026, 11, 9)],
         )
-        self.assertNotIn(today, incremental_sleep_dates(today, 3))
+        self.assertEqual(incremental_sleep_dates(today, 1), [today])
+        start, end = incremental_span(today, 3, include_today=True)
+        dates = incremental_sleep_dates(today, 3)
+        self.assertEqual(dates[0], end)
+        self.assertEqual(dates[-1], start)
 
     def test_activity_window_includes_today(self):
         start, end = incremental_span(date(2024, 6, 2), 3, include_today=True)
@@ -471,9 +476,36 @@ class NotionTests(EnvCase):
 
 
 class SyncFlowTests(EnvCase):
-    def test_incremental_sleep_keeps_the_log_line_and_skips_today(self):
+    def test_incremental_sleep_writes_todays_completed_night(self):
         os.environ["NOTION_SLEEP_DB"] = "sleep-db"
         garmin = IncrementalSleep()
+        notion = FakeNotion()
+        with redirect_stdout(io.StringIO()) as buf:
+            sync_sleep(
+                garmin,
+                notion,
+                mode="incremental",
+                days=3,
+                today=date(2024, 5, 2),
+            )
+        log = buf.getvalue()
+        self.assertIn("2024-05-02: created  (7.0h, score 81)", log)
+        self.assertIn("2024-05-01: created  (1.0h, score 70)", log)
+        self.assertIn("2024-04-30: no sleep data, skipped", log)
+        self.assertEqual(
+            garmin.calls,
+            [("sleep", "2024-05-02"), ("sleep", "2024-05-01"), ("sleep", "2024-04-30")],
+        )
+        created = [event for event in notion.events if event[0] == "page.create"]
+        self.assertEqual(len(created), 2)
+        self.assertEqual(created[0][1]["parent"], {"database_id": "sleep-db"})
+        self.assertEqual(created[0][1]["properties"]["Date"]["date"]["start"], "2024-05-02")
+        self.assertEqual(created[0][1]["properties"]["Duration (h)"]["number"], 7)
+        self.assertEqual(created[1][1]["properties"]["Date"]["date"]["start"], "2024-05-01")
+
+    def test_incremental_sleep_skips_an_empty_today(self):
+        os.environ["NOTION_SLEEP_DB"] = "sleep-db"
+        garmin = IncrementalSleep(nights={"2024-05-02": 0, "2024-05-01": 3600})
         notion = FakeNotion()
         with redirect_stdout(io.StringIO()) as buf:
             sync_sleep(
@@ -484,16 +516,13 @@ class SyncFlowTests(EnvCase):
                 today=date(2024, 5, 2),
             )
         log = buf.getvalue()
+        self.assertIn("2024-05-02: no sleep data, skipped", log)
         self.assertIn("2024-05-01: created  (1.0h, score 70)", log)
-        self.assertIn("2024-04-30: no sleep data, skipped", log)
-        self.assertNotIn("2024-05-02", log)
-        self.assertEqual(garmin.calls, [("sleep", "2024-05-01"), ("sleep", "2024-04-30")])
         created = [event for event in notion.events if event[0] == "page.create"]
         self.assertEqual(len(created), 1)
-        self.assertEqual(created[0][1]["parent"], {"database_id": "sleep-db"})
-        self.assertEqual(created[0][1]["properties"]["Duration (h)"]["number"], 1)
+        self.assertEqual(created[0][1]["properties"]["Date"]["date"]["start"], "2024-05-01")
 
-    def test_sleep_backfill_uses_the_list_and_not_today(self):
+    def test_sleep_backfill_includes_todays_completed_night(self):
         os.environ["NOTION_SLEEP_DB"] = "sleep-db"
         garmin = HistorySleep()
         notion = FakeNotion()
@@ -505,13 +534,23 @@ class SyncFlowTests(EnvCase):
                 days=3,
                 today=date(2024, 2, 10),
             )
-        self.assertIn("2024-01-15: created  (8.0h, score 80)", buf.getvalue())
+        log = buf.getvalue()
+        self.assertIn("Sleep history 2007-01-01 through 2024-02-10", log)
+        self.assertIn("2024-02-10: created  (6.0h, score 74)", log)
+        self.assertIn("2024-01-15: created  (8.0h, score 80)", log)
+        self.assertNotIn("2024-02-09", log)
+        self.assertNotIn("2024-02-08: created", log)
         night_calls = [day for kind, day in garmin.detail_calls]
-        self.assertEqual(night_calls, ["2024-01-15"])
+        self.assertEqual(night_calls, ["2024-02-10", "2024-02-08", "2024-01-15"])
         listed_ends = [end for _start, end in garmin.list_calls]
-        self.assertTrue(listed_ends)
-        self.assertTrue(all(end <= "2024-02-09" for end in listed_ends))
-        self.assertNotIn(("night", "2024-02-10"), garmin.detail_calls)
+        self.assertIn("2024-02-10", listed_ends)
+        self.assertTrue(all(end <= "2024-02-10" for end in listed_ends))
+        created_dates = [
+            event[1]["properties"]["Date"]["date"]["start"]
+            for event in notion.events
+            if event[0] == "page.create"
+        ]
+        self.assertEqual(created_dates, ["2024-02-10", "2024-01-15"])
 
     def test_incremental_activities_upsert_inside_the_window(self):
         os.environ[ACTIVITIES_DB_ENV] = "activities-db"
@@ -598,6 +637,14 @@ class ContractTests(unittest.TestCase):
             "Incremental (recent days)",
         ):
             self.assertIn(phrase, text)
+        self.assertNotIn("ending yesterday", text)
+        self.assertNotIn("Sleep stops at yesterday", text)
+        self.assertNotIn("Sleep still ends yesterday", text)
+        self.assertNotIn("Today is skipped", text)
+        daily = text.split("## What happens every day", 1)[1].split("## ", 1)[0]
+        self.assertIn("last 3 nights, including today", daily)
+        history = text.split("## Full history", 1)[1].split("## ", 1)[0]
+        self.assertIn("Sleep includes today", history)
 
     def test_repo_has_no_hardcoded_secret_material(self):
         for path in ROOT.rglob("*"):
@@ -683,19 +730,27 @@ class FakeNotion:
 
 
 class IncrementalSleep:
-    def __init__(self):
+    def __init__(self, nights=None):
         self.calls = []
+        self.nights = (
+            {"2024-05-02": 7 * 3600, "2024-05-01": 3600}
+            if nights is None
+            else nights
+        )
 
     def get_sleep_data(self, day):
         self.calls.append(("sleep", day))
-        if day == "2024-05-01":
-            return {
-                "dailySleepDTO": {
-                    "sleepTimeSeconds": 3600,
-                    "sleepScores": {"overall": {"value": 70}},
-                }
+        if day not in self.nights or not self.nights[day]:
+            if day in self.nights:
+                return {"dailySleepDTO": {"sleepTimeSeconds": 0}}
+            return {}
+        score = 81 if day == "2024-05-02" else 70
+        return {
+            "dailySleepDTO": {
+                "sleepTimeSeconds": self.nights[day],
+                "sleepScores": {"overall": {"value": score}},
             }
-        return {}
+        }
 
     def get_sleep_daily(self, start, end):
         raise AssertionError("incremental sleep must not walk history")
@@ -708,6 +763,14 @@ class HistorySleep:
 
     def get_sleep_daily(self, start, end):
         self.list_calls.append((start, end))
+        if start == "2024-02-01":
+            return {
+                "individualStats": [
+                    {"calendarDate": "2024-02-10", "sleepTimeSeconds": 6 * 3600},
+                    {"calendarDate": "2024-02-09", "sleepTimeSeconds": 0},
+                    {"calendarDate": "2024-02-08", "sleepTimeSeconds": 5000},
+                ]
+            }
         if start == "2024-01-01":
             return {
                 "individualStats": [
@@ -719,6 +782,13 @@ class HistorySleep:
 
     def get_sleep_data(self, day):
         self.detail_calls.append(("night", day))
+        if day == "2024-02-10":
+            return {
+                "dailySleepDTO": {
+                    "sleepTimeSeconds": 6 * 3600,
+                    "sleepScores": {"overall": {"value": 74}},
+                }
+            }
         if day == "2024-01-15":
             return {
                 "dailySleepDTO": {

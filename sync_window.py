@@ -75,19 +75,22 @@ def describe_run(mode, days, datasets):
 
 
 def incremental_sleep_dates(today, days):
-    """Nights to sync, newest first, starting at yesterday.
+    """Nights to sync, newest first, including today.
 
-    Today is left out because the current night is often unfinished.
-    This is the same set the original sleep loop used: offsets 1..SYNC_DAYS.
+    Garmin dates a completed night on the morning it ends, the same calendar
+    day Daily Metrics uses for that night's HRV. The scheduled run is in the
+    evening, so today's date is last night's finished sleep. A night with no
+    recorded sleep is still skipped by the caller and does not create a page.
     """
-    return [today - timedelta(days=offset) for offset in range(1, days + 1)]
+    return [today - timedelta(days=offset) for offset in range(days)]
 
 
 def incremental_span(today, days, include_today):
     """Inclusive start and end for activities and daily metrics.
 
     Those feeds include today so a workout or step count from this morning
-    shows up on the same day's run. Sleep uses incremental_sleep_dates instead.
+    shows up on the same day's run. Sleep uses incremental_sleep_dates, which
+    covers the same dates, including today.
     """
     end = today if include_today else today - timedelta(days=1)
     start = end - timedelta(days=days - 1)
@@ -129,8 +132,8 @@ def month_bounds(year, month, cap, floor):
 def iter_months(cap, floor):
     """Calendar months from `cap` backward through `floor`, newest first.
 
-    The month that contains `cap` is clipped so a sleep walk that must stop
-    at yesterday does not include today.
+    The month that contains `cap` is clipped to `cap`, so the newest month
+    does not run past the latest day the caller asked for.
     """
     if cap < floor:
         return
