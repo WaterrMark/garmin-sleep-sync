@@ -96,6 +96,8 @@ This is the same idea as the earlier sleep backfill, and it now covers whichever
 
 The scheduled run does not read this number. It stays at 3.
 
+To fill Daily Metrics columns that were empty, or to add the new sleep columns, run this once with **datasets** set to **Daily metrics** or **Sleep** and **sync_days** large enough to cover the pages you already have (about 800 covers November 2024 through November 2026). Leave **mode** on **Incremental (recent days)**. That updates existing pages and does not pull activities. Use **Full history** with only that dataset if you also want months older than the current pages. Full history of daily metrics or sleep still asks Garmin once for the oldest activity date, and it does not rewrite activity pages when activities are not selected.
+
 ## Secrets
 
 These are GitHub Actions secrets. The scripts only read them from the environment.
@@ -114,12 +116,22 @@ These are GitHub Actions secrets. The scripts only read them from the environmen
 
 ## Sleep columns
 
-Unchanged. The page title is the night's date.
+The page title is the night's date. The original columns are unchanged:
 
 - Night, Date
 - Duration (h), Sleep Score, Deep (h), REM (h), Light (h)
 
-A night Garmin did not score is skipped. Stages Garmin omits are left empty.
+These are added from the same nightly `get_sleep_data` payload. A value Garmin omits is left off the page, so a later run does not wipe it.
+
+- Awake (h), Awakenings
+- Bed time, Wake time (the watch's local clock, stored as text)
+- Sleep HR, Sleep HRV (ms), Sleep SpO2
+- Respiration avg, Respiration low, Respiration high
+- Duration score, Deep score, REM score, Light score, Restlessness, Sleep stress score
+
+Formula columns already on Sleep (Garmin) are not part of the sync and are not rewritten: Compare period, Last 14 nights, Last 12 weeks, Week of.
+
+A night Garmin did not score is skipped. Stages Garmin omits are left empty. Bed time and wake time come from `sleepStartTimestampLocal` and `sleepEndTimestampLocal`. Garmin stores that local clock as a timestamp, so the sync formats it as the watch time instead of letting Notion move it into another timezone.
 
 ## Activity columns
 
@@ -131,16 +143,21 @@ The values come from Garmin's activity list, which is the summary `garminconnect
 - Effort: Duration (min), Moving (min), Distance (km), Pace (min/km), Avg speed (km/h), Max speed (km/h), Calories, Elevation gain (m), Elevation loss (m), Steps, Avg cadence, Sets, Reps, Volume
 - Training: Avg HR, Max HR, Avg power (W), Normalized power (W), Max power (W), Aerobic effect, Anaerobic effect, Training load, Training effect, VO2 max
 
-A column stays blank when that activity has no such value (a strength session often has no distance; a run often has no power). GPS tracks, laps, and per-second heart-rate streams are not synced.
+A column stays blank when that activity has no such value (a strength session often has no distance; a run often has no power). Activity **Steps** are the steps counted inside that workout. They are not the day's step total; that number is on Daily Metrics. GPS tracks, laps, and per-second heart-rate streams are not synced.
 
 ## Daily metric columns
 
 The page title is the date. One page per day.
 
 - Heart: Resting HR, Min HR, Max HR, HRV (ms), HRV status, HRV weekly avg
-- Movement: Steps, Step goal, Distance (km), Floors, Moderate intensity (min), Vigorous intensity (min), Intensity minutes
-- Energy and stress: Active calories, Total calories, Avg stress, Max stress
+- Movement: Steps, Step goal, Distance (km), Floors, Floors descended, Moderate intensity (min), Vigorous intensity (min), Intensity minutes
+- Energy and stress: Active calories, BMR calories, Total calories, Avg stress, Max stress
 - Recovery: Body Battery, Body Battery high, Body Battery low, Body Battery charged, Body Battery drained, Training readiness, Readiness level, Recovery time (h), Recovery
+- Daily stats: Respiration avg, Respiration low, Respiration high, SpO2 avg, SpO2 low, SpO2 latest, Hydration (ml), Hydration goal (ml), Training status, Acute load, Daily VO2 max
+
+`get_daily_summaries` returns Garmin's v2 daily summary. Steps, calories, heart rate, stress, Body Battery, respiration, SpO2, and hydration are grouped (`movement`, `calories`, `heartRate`, and so on), not stored under the flat names `totalSteps` or `averageStressLevel`. The sync copies those groups onto the flat names before it writes the page. A flat `get_user_summary` row still works, and a flat value that is already filled is kept.
+
+If a value is missing or null after that, one range call for the same dates fills it. A key that is present and null is still missing. Stat rows shaped as `{calendarDate, values: {...}}` are unwrapped. The range calls are `get_daily_steps`, `get_daily_floors_stats`, `get_calories_daily`, `get_daily_heart_rate_stats`, `get_rhr_daily`, `get_daily_stress_stats`, `get_daily_body_battery_stats`, and `get_daily_respiration_stats`. They are skipped when the summary already has the value.
 
 **Intensity minutes** are Garmin's own total: moderate minutes plus vigorous minutes counted twice. Moderate and vigorous are stored as well. If Garmin sends neither, Intensity minutes is left blank.
 
@@ -148,9 +165,17 @@ The page title is the date. One page per day.
 
 **Training readiness** is the morning snapshot when Garmin marks one (`AFTER_WAKEUP_RESET`). Otherwise the latest snapshot that day is used. Recovery time is that snapshot's minutes, converted to hours. When Garmin says the recovery clock has finished (`REACHED_ZERO`), Recovery time is 0 and Recovery says "Fully recovered", because the minute count Garmin still sends can be the previous value.
 
-**Body Battery and stress** come from the daily summary. If that payload does not include them, the sync tries the body-battery and stress range calls. A day both sources omit is left blank. Average and max stress are Garmin's stress levels. Stress duration is not stored, because the library does not say whether those duration fields are minutes or seconds.
+**Body Battery** is the latest reading (`bodyBatteryMostRecentValue`, or `bodyBattery.latestValue` on the v2 summary). The library's typed `DailyStats` model does not list that field; the live summary does. When the latest reading is absent, the column uses the end-of-day reading (`endOfDayValue`, the last level before sleep). High, low, charged, and drained are stored beside it. Average and max stress are Garmin's stress levels.
 
-**What is not synced:** SpO2, respiration, hydration, weight, and per-minute charts. `garminconnect` can read several of these as separate feeds. They are left out so the daily run stays a handful of requests.
+**Training status** comes from `get_weekly_training_status`, one call for the whole window. That payload has one row per day. The text is Garmin's feedback phrase (`MAINTAINING_2` is stored as "Maintaining"). When more than one device reports the day, the primary training device is kept. Acute load is that row's acute training load. The numeric status code is not stored, because the same number has meant different phrases.
+
+**Daily VO2 max** comes from `get_max_metrics_range`. It is the generic running and walking estimate (`vo2MaxPreciseValue`), on the date Garmin stamps on that estimate. It is not the VO2 max stored on an activity, and cycling VO2 max is not copied into this column.
+
+**Distance (km)** on a v2 summary is the step distance Garmin reports with the step count (`movement.steps.distanceInMeters`). A flat summary's `totalDistanceMeters` is used when that field is already present.
+
+**Stress duration** is not stored. The flat summary documents those fields as seconds, the v2 summary names them milliseconds, and the stress stats chart documents them as seconds.
+
+**What is not synced:** per-minute steps, heart rate, stress, Body Battery, and SpO2 streams; weight; blood pressure; cycling VO2 max; sedentary and active seconds. Weight and blood pressure are sparse and would need another database. SpO2 averages on the daily page come from the summary's `pulseOx` group, not from the per-day SpO2 feed, because that feed is the intraday chart. SpO2 acclimation is not stored either: `get_spo2_acclimation_data` includes that hourly chart, and `get_acclimation_stats` is not in the published model, so its field names were not guessed. Sedentary and active seconds exist on the flat summary only. The v2 summary this job reads does not include them.
 
 A day is skipped when it looks like a placeholder: zeros and null heart rate, stress, Body Battery, steps, and intensity. Total calories alone do not count, because Garmin fills those from your profile even when you did not wear the watch. A zero stress level does not count either; Garmin uses zero for "not scored".
 

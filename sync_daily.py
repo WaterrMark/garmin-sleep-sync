@@ -9,16 +9,24 @@ Rested days that Garmin fills with zeros and null heart-rate, stress, and
 body battery are not written.
 
 Where each column comes from:
-- Steps, heart rate, intensity, calories, floors, stress, and body battery
-  come from the daily summary (get_daily_summaries). If that payload omits a
-  column, the matching range endpoint is tried once for the same dates.
+- get_daily_summaries is a v2 document: steps, calories, heart rate, stress,
+  and Body Battery are grouped, not stored under the flat get_user_summary
+  names. Those groups are copied onto the flat names first.
+- When a flat value is still missing or null, one range call fills it:
+  steps, floors, calories, heart rate, stress, Body Battery, respiration.
+  A key that is present and null is treated as missing. A nested "values"
+  object on those stat rows is unwrapped before the fields are read.
 - HRV comes from get_hrv_data_range (last night's average, weekly average, status).
 - Training readiness and recovery time come from get_training_readiness_range.
   When several snapshots exist for one day, the morning snapshot is kept.
+- Training status is get_weekly_training_status (one call for the window,
+  one row per day). Daily VO2 max is get_max_metrics_range, the generic
+  running estimate, not the per-activity VO2 max.
 
-Stress duration is not stored. The library does not document whether those
-fields are minutes or seconds. SpO2, respiration, hydration, and weight are
-separate feeds and are not requested.
+Stress duration is not stored. The flat summary documents those fields as
+seconds, the v2 summary names them milliseconds, and the stress stats chart
+documents them as seconds. SpO2 averages and respiration averages come from
+the daily summary. Per-minute SpO2, weight, and blood pressure are not requested.
 """
 
 from datetime import date, timedelta
@@ -28,8 +36,11 @@ from garmin_data import (
     DAILY_PROPERTIES,
     as_rows,
     build_daily_record,
+    flatten_daily_summary,
     index_hrv,
     index_readiness,
+    index_training_status,
+    index_vo2,
     merge_alias,
     row_date,
 )
@@ -169,54 +180,134 @@ def _summaries_by_day(garmin, start, end):
     return rows
 
 
-def _seen_keys(rows):
-    seen = set()
+def _needs(rows, *keys):
+    """True when any day is missing a non-null value for one of these keys.
+
+    A key that is present and null still counts as missing. That is the usual
+    shape when the daily summary lists a column Garmin did not score.
+    """
+    return any(row.get(key) is None for row in rows for key in keys)
+
+
+def normalize_stat_rows(rows):
+    """Lift fields out of the {calendarDate, values: {...}} stat-chart shape."""
+    normalized = []
     for row in rows:
-        seen.update(row.keys())
-    return seen
+        if not isinstance(row, dict):
+            continue
+        values = row.get("values")
+        if not isinstance(values, dict):
+            normalized.append(row)
+            continue
+        merged = dict(values)
+        for key, value in row.items():
+            if key == "values":
+                continue
+            if value is not None or key not in merged:
+                merged[key] = value
+        normalized.append(merged)
+    return normalized
+
+
+def _stat_rows(garmin, method_name, start, end, state, label):
+    return normalize_stat_rows(call_rows(garmin, method_name, start, end, state, label))
 
 
 def overlay_missing(garmin, summaries, start, end, state):
-    """Fill summary fields from the dedicated range calls when the keys are absent."""
-    seen = _seen_keys(summaries)
-    heart_keys = ("restingHeartRate", "minHeartRate", "maxHeartRate")
-    if any(key not in seen for key in heart_keys):
-        rows = call_rows(
+    """Fill summary fields from one range call per metric when values are null."""
+    if _needs(summaries, "totalSteps", "dailyStepGoal", "totalDistanceMeters"):
+        rows = _stat_rows(garmin, "get_daily_steps", start, end, state, "Steps")
+        merge_alias(summaries, rows, "totalSteps", ("totalSteps",))
+        merge_alias(summaries, rows, "dailyStepGoal", ("stepGoal", "dailyStepGoal"))
+        merge_alias(
+            summaries,
+            rows,
+            "totalDistanceMeters",
+            ("totalDistance", "wellnessDistanceMeters", "totalDistanceMeters"),
+        )
+
+    if _needs(summaries, "floorsAscended", "floorsDescended"):
+        rows = _stat_rows(garmin, "get_daily_floors_stats", start, end, state, "Floors")
+        merge_alias(summaries, rows, "floorsAscended", ("ascended", "floorsAscended"))
+        merge_alias(summaries, rows, "floorsDescended", ("descended", "floorsDescended"))
+
+    if _needs(summaries, "activeKilocalories", "totalKilocalories", "bmrKilocalories"):
+        rows = _stat_rows(garmin, "get_calories_daily", start, end, state, "Calories")
+        merge_alias(summaries, rows, "activeKilocalories", ("active",))
+        merge_alias(summaries, rows, "bmrKilocalories", ("resting", "bmr"))
+        merge_alias(summaries, rows, "totalKilocalories", ("total",))
+
+    if _needs(summaries, "restingHeartRate", "minHeartRate", "maxHeartRate"):
+        rows = _stat_rows(
             garmin, "get_daily_heart_rate_stats", start, end, state, "Heart rate"
         )
-        merge_alias(summaries, rows, "restingHeartRate", ("restingHR",))
-        merge_alias(summaries, rows, "minHeartRate", ("minHR",))
-        merge_alias(summaries, rows, "maxHeartRate", ("maxHR",))
-        seen = _seen_keys(summaries)
-    if "restingHeartRate" not in seen:
-        rows = call_rows(garmin, "get_rhr_daily", start, end, state, "Resting heart rate")
+        merge_alias(summaries, rows, "restingHeartRate", ("restingHR", "restingValue"))
+        merge_alias(summaries, rows, "minHeartRate", ("minHR", "minValue"))
+        merge_alias(summaries, rows, "maxHeartRate", ("maxHR", "maxValue"))
+    if _needs(summaries, "restingHeartRate"):
+        rows = _stat_rows(garmin, "get_rhr_daily", start, end, state, "Resting heart rate")
         merge_alias(summaries, rows, "restingHeartRate", ("value", "restingHR"))
-        seen = _seen_keys(summaries)
 
-    battery_keys = {
+    if _needs(
+        summaries,
         "bodyBatteryHighestValue",
         "bodyBatteryLowestValue",
         "bodyBatteryChargedValue",
         "bodyBatteryDrainedValue",
-    }
-    if not (battery_keys & seen):
-        rows = call_rows(
+        "bodyBatteryMostRecentValue",
+    ):
+        rows = _stat_rows(
             garmin, "get_daily_body_battery_stats", start, end, state, "Body Battery"
         )
-        merge_alias(summaries, rows, "bodyBatteryHighestValue", ("highest", "high"))
-        merge_alias(summaries, rows, "bodyBatteryLowestValue", ("lowest", "low"))
-        merge_alias(summaries, rows, "bodyBatteryChargedValue", ("charged",))
-        merge_alias(summaries, rows, "bodyBatteryDrainedValue", ("drained",))
-        seen = _seen_keys(summaries)
+        merge_alias(
+            summaries,
+            rows,
+            "bodyBatteryHighestValue",
+            ("highest", "high", "maxValue"),
+        )
+        merge_alias(
+            summaries,
+            rows,
+            "bodyBatteryLowestValue",
+            ("lowest", "low", "minValue"),
+        )
+        merge_alias(
+            summaries,
+            rows,
+            "bodyBatteryChargedValue",
+            ("charged", "chargedValue"),
+        )
+        merge_alias(
+            summaries,
+            rows,
+            "bodyBatteryDrainedValue",
+            ("drained", "drainedValue"),
+        )
+        merge_alias(
+            summaries,
+            rows,
+            "bodyBatteryMostRecentValue",
+            ("latest", "latestValue", "mostRecent", "bodyBatteryMostRecentValue"),
+        )
+        merge_alias(
+            summaries,
+            rows,
+            "bodyBatteryEndOfDayValue",
+            ("endOfDay", "endOfDayValue"),
+        )
 
-    if "averageStressLevel" not in seen and "maxStressLevel" not in seen:
-        rows = call_rows(garmin, "get_daily_stress_stats", start, end, state, "Stress")
-        merge_alias(summaries, rows, "averageStressLevel", ("avgStressLevel", "overallStressLevel"))
-        merge_alias(summaries, rows, "maxStressLevel", ("maxStress",))
-        seen = _seen_keys(summaries)
+    if _needs(summaries, "averageStressLevel", "maxStressLevel"):
+        rows = _stat_rows(garmin, "get_daily_stress_stats", start, end, state, "Stress")
+        merge_alias(
+            summaries,
+            rows,
+            "averageStressLevel",
+            ("avgStressLevel", "overallStressLevel", "avgLevel"),
+        )
+        merge_alias(summaries, rows, "maxStressLevel", ("maxStress", "maxLevel"))
 
-    if "moderateIntensityMinutes" not in seen and "vigorousIntensityMinutes" not in seen:
-        rows = call_rows(
+    if _needs(summaries, "moderateIntensityMinutes", "vigorousIntensityMinutes"):
+        rows = _stat_rows(
             garmin,
             "get_daily_intensity_minutes_stats",
             start,
@@ -227,11 +318,36 @@ def overlay_missing(garmin, summaries, start, end, state):
         merge_alias(summaries, rows, "moderateIntensityMinutes", ("moderate", "moderateValue"))
         merge_alias(summaries, rows, "vigorousIntensityMinutes", ("vigorous", "vigorousValue"))
 
+    if _needs(summaries, "avgWakingRespirationValue"):
+        rows = _stat_rows(
+            garmin, "get_daily_respiration_stats", start, end, state, "Respiration"
+        )
+        merge_alias(
+            summaries,
+            rows,
+            "avgWakingRespirationValue",
+            ("avgValue", "averageRespirationValue"),
+        )
+        merge_alias(
+            summaries,
+            rows,
+            "lowestRespirationValue",
+            ("minValue", "lowestRespirationValue"),
+        )
+        merge_alias(
+            summaries,
+            rows,
+            "highestRespirationValue",
+            ("maxValue", "highestRespirationValue"),
+        )
+
 
 def load_daily_window(garmin, start, end, state):
     summaries = fetch_summaries(garmin, start, end)
     if not summaries:
         return []
+    for row in summaries:
+        flatten_daily_summary(row)
     overlay_missing(garmin, summaries, start, end, state)
     if not any(build_daily_record(row, None, None) for row in summaries):
         return []
@@ -248,6 +364,24 @@ def load_daily_window(garmin, start, end, state):
         "Training readiness",
         index_readiness,
     )
+    training = call_indexed(
+        garmin,
+        "get_weekly_training_status",
+        start,
+        end,
+        state,
+        "Training status",
+        index_training_status,
+    )
+    vo2 = call_indexed(
+        garmin,
+        "get_max_metrics_range",
+        start,
+        end,
+        state,
+        "Daily VO2 max",
+        index_vo2,
+    )
     by_date = {}
     for row in summaries:
         day = row_date(row)
@@ -262,6 +396,8 @@ def load_daily_window(garmin, start, end, state):
             by_date.get(day) or {"calendarDate": day},
             hrv.get(day),
             readiness.get(day),
+            training.get(day),
+            vo2.get(day),
         )
         if record:
             records.append(record)

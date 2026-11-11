@@ -31,7 +31,7 @@ from notion_store import (
 )
 from sync_activities import fetch_all_activities, fetch_recent_activities, oldest_activity_date, sync_activities
 from sync_daily import EndpointState, load_daily_window
-from sync_sleep import hours, parse_night, sync_sleep
+from sync_sleep import SLEEP_PROPERTIES, hours, parse_night, sleep_properties, sync_sleep
 from sync_window import (
     describe_run,
     history_floor,
@@ -121,6 +121,95 @@ class SleepParseTests(unittest.TestCase):
         self.assertIsNone(parse_night({"dailySleepDTO": {}}))
         self.assertIsNone(parse_night({"dailySleepDTO": {"sleepTimeSeconds": 0}}))
         self.assertIsNone(parse_night(None))
+
+    def test_sleep_enrichment_maps_the_nightly_summary(self):
+        """Bed, wake, awake time, HRV, SpO2, respiration, and sub-scores come
+        from the same get_sleep_data payload. Local epochs are the watch clock.
+        """
+        raw = {
+            "dailySleepDTO": {
+                "calendarDate": "2024-05-02",
+                "sleepTimeSeconds": 27000,
+                "deepSleepSeconds": 3600,
+                "remSleepSeconds": 5400,
+                "lightSleepSeconds": 18000,
+                "awakeSleepSeconds": 1800,
+                "awakeCount": 3,
+                "sleepStartTimestampLocal": 1626740400000,
+                "sleepEndTimestampLocal": 1626767940000,
+                "avgSleepHRV": 42.4,
+                "avgHeartRate": 51,
+                "averageSpO2Value": 96,
+                "averageRespirationValue": 15.2,
+                "lowestRespirationValue": 11,
+                "highestRespirationValue": 19,
+                "sleepScores": {
+                    "overall": {"value": 82},
+                    "totalDuration": {"value": 80, "qualifierKey": "GOOD"},
+                    "deepPercentage": {"value": 70},
+                    "remPercentage": {"value": 74},
+                    "lightPercentage": {"value": 60},
+                    "restlessness": {"value": 55},
+                    "stress": {"value": 88},
+                },
+            }
+        }
+        night = parse_night(raw)
+        self.assertEqual(night["duration_h"], 7.5)
+        self.assertEqual(night["score"], 82)
+        self.assertEqual(night["deep_h"], 1)
+        self.assertEqual(night["awake_h"], 0.5)
+        self.assertEqual(night["awakenings"], 3)
+        self.assertEqual(night["bed"], "2021-07-20 00:20")
+        self.assertEqual(night["wake"], "2021-07-20 07:59")
+        self.assertEqual(night["hrv"], 42.4)
+        self.assertEqual(night["sleep_hr"], 51)
+        self.assertEqual(night["spo2"], 96)
+        self.assertEqual(night["respiration"], 15.2)
+        self.assertEqual(night["respiration_low"], 11)
+        self.assertEqual(night["respiration_high"], 19)
+        self.assertEqual(night["duration_score"], 80)
+        self.assertEqual(night["deep_score"], 70)
+        props = sleep_properties("2024-05-02", night)
+        self.assertEqual(props["Duration (h)"]["number"], 7.5)
+        self.assertEqual(props["Sleep Score"]["number"], 82)
+        self.assertEqual(props["Deep (h)"]["number"], 1)
+        self.assertEqual(props["REM (h)"]["number"], 1.5)
+        self.assertEqual(props["Light (h)"]["number"], 5)
+        self.assertEqual(props["Awake (h)"]["number"], 0.5)
+        self.assertEqual(props["Awakenings"]["number"], 3)
+        self.assertEqual(props["Bed time"]["rich_text"][0]["text"]["content"], "2021-07-20 00:20")
+        self.assertEqual(props["Wake time"]["rich_text"][0]["text"]["content"], "2021-07-20 07:59")
+        self.assertEqual(props["Sleep HRV (ms)"]["number"], 42.4)
+        self.assertEqual(props["Sleep HR"]["number"], 51)
+        self.assertEqual(props["Sleep SpO2"]["number"], 96)
+        self.assertEqual(props["Respiration avg"]["number"], 15.2)
+        self.assertEqual(props["Respiration low"]["number"], 11)
+        self.assertEqual(props["Respiration high"]["number"], 19)
+        self.assertEqual(props["Duration score"]["number"], 80)
+        self.assertEqual(props["Restlessness"]["number"], 55)
+        self.assertEqual(props["Sleep stress score"]["number"], 88)
+        for name in ("Compare period", "Last 14 nights", "Last 12 weeks", "Week of"):
+            self.assertNotIn(name, SLEEP_PROPERTIES)
+            self.assertNotIn(name, props)
+
+    def test_sleep_enrichment_stays_off_when_the_payload_omits_it(self):
+        night = parse_night(
+            {
+                "dailySleepDTO": {
+                    "sleepTimeSeconds": 3600,
+                    "sleepScores": {"overall": {"value": 70}},
+                }
+            }
+        )
+        props = sleep_properties("2024-05-01", night)
+        self.assertEqual(props["Duration (h)"]["number"], 1)
+        self.assertEqual(props["Sleep Score"]["number"], 70)
+        self.assertNotIn("Awake (h)", props)
+        self.assertNotIn("Bed time", props)
+        self.assertNotIn("Sleep HRV (ms)", props)
+        self.assertNotIn("Sleep SpO2", props)
+        self.assertNotIn("Respiration avg", props)
 
 
 class ActivityTests(unittest.TestCase):
@@ -366,6 +455,27 @@ class DailyTests(unittest.TestCase):
                     }
                 ]
 
+            def get_daily_steps(self, start, end):
+                return []
+
+            def get_daily_floors_stats(self, start, end):
+                return []
+
+            def get_calories_daily(self, start, end):
+                return []
+
+            def get_daily_respiration_stats(self, start, end):
+                return []
+
+            def get_daily_intensity_minutes_stats(self, start, end):
+                return []
+
+            def get_weekly_training_status(self, start, end):
+                return []
+
+            def get_max_metrics_range(self, start, end):
+                return []
+
         records = load_daily_window(Garmin(), date(2024, 5, 1), date(2024, 5, 3), EndpointState())
         self.assertEqual([record["date"] for record in records], ["2024-05-01"])
         props = records[0]["properties"]
@@ -379,6 +489,455 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(props["Readiness level"]["rich_text"][0]["text"]["content"], "High")
         self.assertEqual(props["Recovery time (h)"]["number"], 2)
         self.assertEqual(props["Intensity minutes"]["number"], 40)
+
+    def test_flat_summary_writes_the_columns_that_were_empty(self):
+        record = build_daily_record(
+            {
+                "calendarDate": "2024-05-01",
+                "restingHeartRate": 47,
+                "minHeartRate": 42,
+                "maxHeartRate": 168,
+                "totalSteps": 8432,
+                "dailyStepGoal": 10000,
+                "totalDistanceMeters": 6543,
+                "floorsAscended": 11,
+                "floorsDescended": 8,
+                "moderateIntensityMinutes": 22,
+                "vigorousIntensityMinutes": 6,
+                "activeKilocalories": 480,
+                "bmrKilocalories": 1750,
+                "totalKilocalories": 2230,
+                "averageStressLevel": 28,
+                "maxStressLevel": 86,
+                "stressDuration": 14400,
+                "bodyBatteryHighestValue": 95,
+                "bodyBatteryLowestValue": 18,
+                "bodyBatteryChargedValue": 46,
+                "bodyBatteryDrainedValue": 61,
+                "bodyBatteryMostRecentValue": 34,
+                "avgWakingRespirationValue": 14.5,
+                "lowestRespirationValue": 10,
+                "highestRespirationValue": 22,
+                "averageSpo2": 96,
+                "lowestSpo2": 91,
+                "latestSpo2": 97,
+                "hydrationValueInML": 1800,
+                "hydrationGoalInML": 2500,
+            },
+            {"lastNightAvg": 44, "weeklyAvg": 46, "status": "BALANCED"},
+            {
+                "score": 72,
+                "level": "MODERATE",
+                "recoveryTime": 90,
+                "recoveryTimeChangePhrase": "RECOVERING",
+            },
+        )
+        props = record["properties"]
+        self.assertEqual(props["Resting HR"]["number"], 47)
+        self.assertEqual(props["Min HR"]["number"], 42)
+        self.assertEqual(props["Max HR"]["number"], 168)
+        self.assertEqual(props["Steps"]["number"], 8432)
+        self.assertEqual(props["Step goal"]["number"], 10000)
+        self.assertEqual(props["Distance (km)"]["number"], 6.54)
+        self.assertEqual(props["Floors"]["number"], 11)
+        self.assertEqual(props["Floors descended"]["number"], 8)
+        self.assertEqual(props["Moderate intensity (min)"]["number"], 22)
+        self.assertEqual(props["Vigorous intensity (min)"]["number"], 6)
+        self.assertEqual(props["Intensity minutes"]["number"], 34)
+        self.assertEqual(props["Active calories"]["number"], 480)
+        self.assertEqual(props["BMR calories"]["number"], 1750)
+        self.assertEqual(props["Total calories"]["number"], 2230)
+        self.assertEqual(props["Avg stress"]["number"], 28)
+        self.assertEqual(props["Max stress"]["number"], 86)
+        self.assertNotIn("Stress duration", props)
+        self.assertEqual(props["Body Battery high"]["number"], 95)
+        self.assertEqual(props["Body Battery low"]["number"], 18)
+        self.assertEqual(props["Body Battery charged"]["number"], 46)
+        self.assertEqual(props["Body Battery drained"]["number"], 61)
+        self.assertEqual(props["Body Battery"]["number"], 34)
+        self.assertEqual(props["HRV (ms)"]["number"], 44)
+        self.assertEqual(props["HRV weekly avg"]["number"], 46)
+        self.assertEqual(props["HRV status"]["rich_text"][0]["text"]["content"], "Balanced")
+        self.assertEqual(props["Training readiness"]["number"], 72)
+        self.assertEqual(props["Readiness level"]["rich_text"][0]["text"]["content"], "Moderate")
+        self.assertEqual(props["Recovery time (h)"]["number"], 1.5)
+        self.assertEqual(props["Respiration avg"]["number"], 14.5)
+        self.assertEqual(props["Respiration low"]["number"], 10)
+        self.assertEqual(props["Respiration high"]["number"], 22)
+        self.assertEqual(props["SpO2 avg"]["number"], 96)
+        self.assertEqual(props["SpO2 low"]["number"], 91)
+        self.assertEqual(props["SpO2 latest"]["number"], 97)
+        self.assertEqual(props["Hydration (ml)"]["number"], 1800)
+        self.assertEqual(props["Hydration goal (ml)"]["number"], 2500)
+
+    def test_grouped_v2_summary_fills_the_same_columns(self):
+        """get_daily_summaries returns topic groups, not the flat user-summary keys."""
+        record = build_daily_record(
+            {
+                "calendarDate": "2024-05-03",
+                "includesWellnessData": True,
+                "movement": {
+                    "steps": {"goal": 8000, "value": 11234, "distanceInMeters": 9010},
+                    "floorsAscended": {"goal": 10, "value": 14},
+                    "floorsDescended": {"value": 6},
+                },
+                "calories": {"burnedResting": 1600, "burnedActive": 510, "burnedTotal": 2110},
+                "heartRate": {"minValue": 45, "maxValue": 154, "restingValue": 49},
+                "intensityMinutes": {"goal": 150, "moderate": 18, "vigorous": 7},
+                "stress": {
+                    "avgLevel": 33,
+                    "maxLevel": 91,
+                    "totalDurationInMillis": 3600000,
+                },
+                "bodyBattery": {
+                    "minValue": 12,
+                    "maxValue": 88,
+                    "chargedValue": 41,
+                    "drainedValue": 52,
+                    "latestValue": 27,
+                    "endOfDayValue": 30,
+                },
+                "respiration": {"avgValue": 15, "minValue": 9, "maxValue": 21},
+                "pulseOx": {"avgValue": 95, "minValue": 90, "latestValue": 97},
+                "hydration": {"goalInMl": 2000, "consumedInFractionalMl": 1250.4},
+            },
+            None,
+            None,
+        )
+        props = record["properties"]
+        self.assertEqual(props["Steps"]["number"], 11234)
+        self.assertEqual(props["Step goal"]["number"], 8000)
+        self.assertEqual(props["Distance (km)"]["number"], 9.01)
+        self.assertEqual(props["Floors"]["number"], 14)
+        self.assertEqual(props["Floors descended"]["number"], 6)
+        self.assertEqual(props["Active calories"]["number"], 510)
+        self.assertEqual(props["BMR calories"]["number"], 1600)
+        self.assertEqual(props["Total calories"]["number"], 2110)
+        self.assertEqual(props["Resting HR"]["number"], 49)
+        self.assertEqual(props["Min HR"]["number"], 45)
+        self.assertEqual(props["Max HR"]["number"], 154)
+        self.assertEqual(props["Moderate intensity (min)"]["number"], 18)
+        self.assertEqual(props["Vigorous intensity (min)"]["number"], 7)
+        self.assertEqual(props["Intensity minutes"]["number"], 32)
+        self.assertEqual(props["Avg stress"]["number"], 33)
+        self.assertEqual(props["Max stress"]["number"], 91)
+        self.assertNotIn("Stress duration", props)
+        self.assertEqual(props["Body Battery"]["number"], 27)
+        self.assertEqual(props["Body Battery high"]["number"], 88)
+        self.assertEqual(props["Body Battery low"]["number"], 12)
+        self.assertEqual(props["Body Battery charged"]["number"], 41)
+        self.assertEqual(props["Body Battery drained"]["number"], 52)
+        self.assertEqual(props["Respiration avg"]["number"], 15)
+        self.assertEqual(props["SpO2 avg"]["number"], 95)
+        self.assertEqual(props["Hydration (ml)"]["number"], 1250)
+        self.assertEqual(props["Hydration goal (ml)"]["number"], 2000)
+
+    def test_body_battery_uses_end_of_day_when_latest_is_missing(self):
+        record = build_daily_record(
+            {
+                "calendarDate": "2024-05-03",
+                "totalSteps": 4000,
+                "bodyBattery": {"maxValue": 80, "minValue": 20, "endOfDayValue": 36},
+            },
+            None,
+            None,
+        )
+        self.assertEqual(record["properties"]["Body Battery"]["number"], 36)
+        self.assertEqual(record["properties"]["Body Battery high"]["number"], 80)
+
+    def test_null_summary_keys_are_filled_from_range_stats(self):
+        class Garmin:
+            def __init__(self):
+                self.calls = []
+
+            def get_daily_summaries(self, start, end):
+                return {
+                    "data": [
+                        {
+                            "calendarDate": "2024-05-01",
+                            "restingHeartRate": 47,
+                            "moderateIntensityMinutes": 20,
+                            "vigorousIntensityMinutes": 10,
+                            "totalSteps": None,
+                            "dailyStepGoal": None,
+                            "totalDistanceMeters": None,
+                            "floorsAscended": None,
+                            "floorsDescended": None,
+                            "activeKilocalories": None,
+                            "totalKilocalories": None,
+                            "bmrKilocalories": None,
+                            "minHeartRate": None,
+                            "maxHeartRate": None,
+                            "averageStressLevel": None,
+                            "maxStressLevel": None,
+                            "bodyBatteryHighestValue": None,
+                            "bodyBatteryLowestValue": None,
+                            "bodyBatteryChargedValue": None,
+                            "bodyBatteryDrainedValue": None,
+                            "bodyBatteryMostRecentValue": None,
+                            "avgWakingRespirationValue": None,
+                            "averageSpo2": None,
+                        }
+                    ]
+                }
+
+            def get_daily_steps(self, start, end):
+                self.calls.append("steps")
+                return [
+                    {
+                        "calendarDate": "2024-05-01",
+                        "totalSteps": 9000,
+                        "stepGoal": 10000,
+                        "totalDistance": 7200,
+                    }
+                ]
+
+            def get_daily_floors_stats(self, start, end):
+                self.calls.append("floors")
+                return [
+                    {
+                        "calendarDate": "2024-05-01",
+                        "values": {"floorsAscended": 12, "floorsDescended": 9},
+                    }
+                ]
+
+            def get_calories_daily(self, start, end):
+                self.calls.append("calories")
+                return [
+                    {
+                        "calendarDate": "2024-05-01",
+                        "active": 400,
+                        "resting": 1600,
+                        "total": 2000,
+                    }
+                ]
+
+            def get_daily_heart_rate_stats(self, start, end):
+                self.calls.append("hr")
+                return [
+                    {
+                        "calendarDate": "2024-05-01",
+                        "values": {
+                            "restingHeartRate": 99,
+                            "minHeartRate": 44,
+                            "maxHeartRate": 161,
+                        },
+                    }
+                ]
+
+            def get_rhr_daily(self, start, end):
+                self.calls.append("rhr")
+                return [{"calendarDate": "2024-05-01", "value": 40}]
+
+            def get_daily_stress_stats(self, start, end):
+                self.calls.append("stress")
+                return [
+                    {
+                        "calendarDate": "2024-05-01",
+                        "values": {
+                            "overallStressLevel": 31,
+                            "highStressDuration": 1200,
+                            "maxStressLevel": 88,
+                        },
+                    }
+                ]
+
+            def get_daily_body_battery_stats(self, start, end):
+                self.calls.append("battery")
+                return [
+                    {
+                        "calendarDate": "2024-05-01",
+                        "values": {
+                            "highest": 92,
+                            "lowest": 16,
+                            "charged": 38,
+                            "drained": 57,
+                            "latest": 29,
+                        },
+                    }
+                ]
+
+            def get_daily_respiration_stats(self, start, end):
+                self.calls.append("respiration")
+                return [
+                    {
+                        "calendarDate": "2024-05-01",
+                        "values": {
+                            "avgWakingRespirationValue": 14,
+                            "lowestRespirationValue": 9,
+                            "highestRespirationValue": 20,
+                        },
+                    }
+                ]
+
+            def get_hrv_data_range(self, start, end):
+                return {
+                    "hrvSummaries": [
+                        {
+                            "calendarDate": "2024-05-01",
+                            "lastNightAvg": 41,
+                            "weeklyAvg": 43,
+                            "status": "BALANCED",
+                        }
+                    ]
+                }
+
+            def get_training_readiness_range(self, start, end):
+                return [
+                    {
+                        "calendarDate": "2024-05-01",
+                        "score": 68,
+                        "level": "MODERATE",
+                        "recoveryTime": 180,
+                        "inputContext": "AFTER_WAKEUP_RESET",
+                    }
+                ]
+
+            def get_weekly_training_status(self, start, end):
+                self.calls.append("training")
+                return {
+                    "weeklyTrainingStatus": {
+                        "payload": {
+                            "reportData": {
+                                "111": [
+                                    {
+                                        "calendarDate": "2024-05-01",
+                                        "trainingStatus": 4,
+                                        "trainingStatusFeedbackPhrase": "MAINTAINING_2",
+                                        "primaryTrainingDevice": True,
+                                        "acuteTrainingLoadDTO": {
+                                            "dailyTrainingLoadAcute": 224,
+                                            "acwrStatus": "OPTIMAL",
+                                        },
+                                    }
+                                ],
+                                "222": [
+                                    {
+                                        "calendarDate": "2024-05-01",
+                                        "trainingStatusFeedbackPhrase": "UNPRODUCTIVE",
+                                        "primaryTrainingDevice": False,
+                                        "acuteTrainingLoadDTO": {"dailyTrainingLoadAcute": 10},
+                                    }
+                                ],
+                            }
+                        }
+                    }
+                }
+
+            def get_max_metrics_range(self, start, end):
+                self.calls.append("vo2")
+                return [
+                    {
+                        "generic": {
+                            "calendarDate": "2024-05-01",
+                            "vo2MaxPreciseValue": 47.6,
+                            "vo2MaxValue": 48,
+                        },
+                        "cycling": {"calendarDate": "2024-05-01", "vo2MaxPreciseValue": 51.2},
+                    }
+                ]
+
+        garmin = Garmin()
+        records = load_daily_window(garmin, date(2024, 5, 1), date(2024, 5, 3), EndpointState())
+        self.assertEqual([record["date"] for record in records], ["2024-05-01"])
+        props = records[0]["properties"]
+        self.assertEqual(props["Resting HR"]["number"], 47)
+        self.assertNotEqual(props["Resting HR"]["number"], 99)
+        self.assertEqual(props["Min HR"]["number"], 44)
+        self.assertEqual(props["Max HR"]["number"], 161)
+        self.assertEqual(props["Steps"]["number"], 9000)
+        self.assertEqual(props["Step goal"]["number"], 10000)
+        self.assertEqual(props["Distance (km)"]["number"], 7.2)
+        self.assertEqual(props["Floors"]["number"], 12)
+        self.assertEqual(props["Floors descended"]["number"], 9)
+        self.assertEqual(props["Active calories"]["number"], 400)
+        self.assertEqual(props["BMR calories"]["number"], 1600)
+        self.assertEqual(props["Total calories"]["number"], 2000)
+        self.assertEqual(props["Avg stress"]["number"], 31)
+        self.assertEqual(props["Max stress"]["number"], 88)
+        self.assertNotIn("Stress duration", props)
+        self.assertEqual(props["Body Battery high"]["number"], 92)
+        self.assertEqual(props["Body Battery low"]["number"], 16)
+        self.assertEqual(props["Body Battery charged"]["number"], 38)
+        self.assertEqual(props["Body Battery drained"]["number"], 57)
+        self.assertEqual(props["Body Battery"]["number"], 29)
+        self.assertEqual(props["Intensity minutes"]["number"], 40)
+        self.assertEqual(props["HRV (ms)"]["number"], 41)
+        self.assertEqual(props["Training readiness"]["number"], 68)
+        self.assertEqual(props["Recovery time (h)"]["number"], 3)
+        self.assertEqual(props["Respiration avg"]["number"], 14)
+        self.assertEqual(props["Training status"]["rich_text"][0]["text"]["content"], "Maintaining")
+        self.assertEqual(props["Acute load"]["number"], 224)
+        self.assertEqual(props["Daily VO2 max"]["number"], 47.6)
+        self.assertFalse(any("cycling" in name.lower() or name == "VO2 max" for name in props))
+        self.assertIn("steps", garmin.calls)
+        self.assertIn("stress", garmin.calls)
+        self.assertIn("battery", garmin.calls)
+        self.assertNotIn("rhr", garmin.calls)
+
+    def test_grouped_summary_does_not_refetch_fields_it_already_has(self):
+        class Garmin:
+            def __init__(self):
+                self.calls = []
+
+            def get_daily_summaries(self, start, end):
+                return {
+                    "data": [
+                        {
+                            "calendarDate": "2024-05-02",
+                            "movement": {
+                                "steps": {"value": 5000, "goal": 7500, "distanceInMeters": 4000},
+                                "floorsAscended": {"value": 3},
+                                "floorsDescended": {"value": 2},
+                            },
+                            "calories": {"burnedActive": 200, "burnedResting": 1500, "burnedTotal": 1700},
+                            "heartRate": {"restingValue": 50, "minValue": 46, "maxValue": 140},
+                            "intensityMinutes": {"moderate": 5, "vigorous": 0},
+                            "stress": {"avgLevel": 22, "maxLevel": 70},
+                            "bodyBattery": {
+                                "maxValue": 90,
+                                "minValue": 25,
+                                "chargedValue": 30,
+                                "drainedValue": 40,
+                                "latestValue": 55,
+                            },
+                            "respiration": {"avgValue": 13, "minValue": 10, "maxValue": 18},
+                            "pulseOx": {"avgValue": 97, "minValue": 94, "latestValue": 98},
+                        }
+                    ]
+                }
+
+            def _unused(self, name):
+                def method(start, end):
+                    self.calls.append(name)
+                    return []
+
+                return method
+
+            def __getattr__(self, name):
+                if name.startswith("get_"):
+                    return self._unused(name)
+                raise AttributeError(name)
+
+        garmin = Garmin()
+        records = load_daily_window(garmin, date(2024, 5, 2), date(2024, 5, 2), EndpointState())
+        props = records[0]["properties"]
+        self.assertEqual(props["Steps"]["number"], 5000)
+        self.assertEqual(props["Body Battery"]["number"], 55)
+        self.assertEqual(props["Avg stress"]["number"], 22)
+        for name in (
+            "get_daily_steps",
+            "get_daily_stress_stats",
+            "get_daily_body_battery_stats",
+            "get_daily_heart_rate_stats",
+            "get_daily_floors_stats",
+            "get_calories_daily",
+            "get_daily_respiration_stats",
+            "get_rhr_daily",
+        ):
+            self.assertNotIn(name, garmin.calls, name)
+        self.assertIn("get_weekly_training_status", garmin.calls)
+        self.assertIn("get_max_metrics_range", garmin.calls)
 
 
 class NotionTests(EnvCase):
@@ -480,6 +1039,7 @@ class SyncFlowTests(EnvCase):
         os.environ["NOTION_SLEEP_DB"] = "sleep-db"
         garmin = IncrementalSleep()
         notion = FakeNotion()
+        seed_sleep_db(notion)
         with redirect_stdout(io.StringIO()) as buf:
             sync_sleep(
                 garmin,
@@ -502,11 +1062,22 @@ class SyncFlowTests(EnvCase):
         self.assertEqual(created[0][1]["properties"]["Date"]["date"]["start"], "2024-05-02")
         self.assertEqual(created[0][1]["properties"]["Duration (h)"]["number"], 7)
         self.assertEqual(created[1][1]["properties"]["Date"]["date"]["start"], "2024-05-01")
+        updates = [event for event in notion.events if event[0] == "db.update"]
+        self.assertTrue(updates)
+        added = updates[0][1]["properties"]
+        self.assertIn("Awake (h)", added)
+        self.assertIn("Bed time", added)
+        self.assertNotIn("Compare period", added)
+        self.assertNotIn("Last 14 nights", added)
+        self.assertNotIn("Last 12 weeks", added)
+        self.assertNotIn("Week of", added)
+        self.assertNotIn("Night", added)
 
     def test_incremental_sleep_skips_an_empty_today(self):
         os.environ["NOTION_SLEEP_DB"] = "sleep-db"
         garmin = IncrementalSleep(nights={"2024-05-02": 0, "2024-05-01": 3600})
         notion = FakeNotion()
+        seed_sleep_db(notion)
         with redirect_stdout(io.StringIO()) as buf:
             sync_sleep(
                 garmin,
@@ -526,6 +1097,7 @@ class SyncFlowTests(EnvCase):
         os.environ["NOTION_SLEEP_DB"] = "sleep-db"
         garmin = HistorySleep()
         notion = FakeNotion()
+        seed_sleep_db(notion)
         with redirect_stdout(io.StringIO()) as buf:
             sync_sleep(
                 garmin,
@@ -591,6 +1163,12 @@ class ContractTests(unittest.TestCase):
             "get_daily_intensity_minutes_stats",
             "get_daily_heart_rate_stats",
             "get_rhr_daily",
+            "get_daily_steps",
+            "get_daily_floors_stats",
+            "get_calories_daily",
+            "get_daily_respiration_stats",
+            "get_weekly_training_status",
+            "get_max_metrics_range",
         ):
             self.assertTrue(callable(getattr(Garmin, name)), name)
 
@@ -663,6 +1241,22 @@ class ContractTests(unittest.TestCase):
     def test_errors_do_not_echo_credentials(self):
         self.assertEqual(safe_error(RuntimeError("bad password=example")), "RuntimeError")
         self.assertEqual(safe_error(RuntimeError("boom")), "boom")
+
+
+def seed_sleep_db(notion):
+    notion.database["properties"] = {
+        "Night": {"type": "title"},
+        "Date": {"type": "date"},
+        "Duration (h)": {"type": "number"},
+        "Sleep Score": {"type": "number"},
+        "Deep (h)": {"type": "number"},
+        "REM (h)": {"type": "number"},
+        "Light (h)": {"type": "number"},
+        "Compare period": {"type": "formula"},
+        "Last 14 nights": {"type": "formula"},
+        "Last 12 weeks": {"type": "formula"},
+        "Week of": {"type": "formula"},
+    }
 
 
 class FakeNotion:
