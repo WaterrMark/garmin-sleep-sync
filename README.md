@@ -8,21 +8,21 @@ This syncs three kinds of Garmin Connect data into Notion:
 
 A run is safe to repeat. Sleep and daily metrics match an existing page by date. Activities match by Garmin's activity id. A second run updates those pages instead of creating duplicates.
 
-The automatic run stays small. Once a day it refreshes the last 3 days. A full history pull is a separate button you press once.
+The automatic runs stay small. Every two hours from late morning through the evening they refresh the last 3 days. A full history pull is a separate button you press once.
 
 ## What happens every day
 
-GitHub Actions runs **Sync Garmin to Notion** at 13:00 UTC (21:00 in Hong Kong).
+GitHub Actions runs **Sync Garmin to Notion** six times a day, at 11:10, 13:10, 15:10, 17:10, 19:10, and 21:10 in Hong Kong. Those are 03:10, 05:10, 07:10, 09:10, 11:10, and 13:10 UTC (`10 3,5,7,9,11,13 * * *`). The minute is 10 past the hour so the run is less likely to wait in the queue that builds at the top of the hour. Nothing is scheduled overnight or in the early morning.
 
-That run is incremental:
+Each run is the same incremental sync:
 
-- **Sleep** is the last 3 nights, including today. Garmin dates a completed night on the morning you wake, so last night's sleep is stored on today's date, the same day as that night's HRV. A night with no recorded sleep is skipped and does not create a page.
+- **Sleep** is the last 3 nights, including today. Garmin dates a completed night on the morning you wake, so last night's sleep is stored on today's date, the same day as that night's HRV. A night with no recorded sleep is skipped and does not create a page. A later run the same day writes it once Garmin has scored it.
 - **Activities** are anything that started in the last 3 days, including today, so a morning workout shows up the same day.
-- **Daily metrics** are today and the previous 2 days. Today's step count updates on the next runs, and yesterday is written again after it has settled.
+- **Daily metrics** are today and the previous 2 days. Today's step count updates on the later runs, and yesterday is written again after it has settled.
 
-You do not need to do anything for this daily run once the secrets below are saved.
+You do not need to do anything for these scheduled runs once the secrets below are saved.
 
-Dates follow the GitHub runner clock, which is UTC. At 13:00 UTC that date is the same calendar day as Hong Kong.
+Dates follow the GitHub runner clock, which is UTC. Hong Kong is 8 hours ahead and does not use daylight saving. The two dates differ only from midnight to 08:00 in Hong Kong (16:00–24:00 UTC the day before). Every scheduled start is between 03:10 and 13:10 UTC, so "today" is already the Hong Kong date, and that date is the morning last night's sleep ended. The workflow does not set `TZ`.
 
 ## One-time setup
 
@@ -76,7 +76,7 @@ Do this once, after the incremental run above has created the databases.
 2. Set **mode** to **Full history**.
 3. Set **datasets** to **All**, or to one dataset if you only want that.
 4. Leave **sync_days** at 3. Full history ignores it.
-5. Run it. This one is much longer than the daily run, because it asks Garmin for older days one month at a time and then writes a Notion page for each day or activity. You only need to do it once.
+5. Run it. This one is much longer than a scheduled run, because it asks Garmin for older days one month at a time and then writes a Notion page for each day or activity. You only need to do it once.
 
 What "full history" means:
 

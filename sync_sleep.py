@@ -4,7 +4,7 @@ Garmin -> Notion sleep sync.
 Pulls sleep from Garmin Connect and writes it into the "Sleep (Garmin)" database.
 Safe to run repeatedly: it updates an existing night rather than creating duplicates.
 
-Incremental runs (the daily default) include today and go back SYNC_DAYS
+Incremental runs (the scheduled default) include today and go back SYNC_DAYS
 nights (default 3). Garmin dates a completed night on the wake morning, so
 today is last night's sleep. A night with no recorded sleep is skipped.
 Full history (SYNC_MODE=backfill) walks each month from today back through

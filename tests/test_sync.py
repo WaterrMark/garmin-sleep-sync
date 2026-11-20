@@ -5,7 +5,8 @@ import os
 import re
 import unittest
 from contextlib import redirect_stdout
-from datetime import date
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from garminconnect import Garmin
@@ -1179,7 +1180,10 @@ class ContractTests(unittest.TestCase):
 
     def test_workflow_stays_incremental_on_the_schedule(self):
         text = (ROOT / ".github/workflows/sync-sleep.yml").read_text()
-        self.assertIn('cron: "0 13 * * *"', text)
+        self.assertIn('cron: "10 3,5,7,9,11,13 * * *"', text)
+        self.assertNotIn('cron: "0 13 * * *"', text)
+        self.assertIn("group: garmin-notion-sync", text)
+        self.assertIn("workflow_dispatch:", text)
         self.assertIn("python sync_garmin.py", text)
         self.assertNotIn("pull_request:", text)
         self.assertNotIn("\n  push:", text)
@@ -1198,11 +1202,29 @@ class ContractTests(unittest.TestCase):
         script = text.split("run: |", 1)[1].split("env:", 1)[0]
         self.assertNotIn("GARMIN", script)
         self.assertNotIn("NOTION", script)
+        self.assertNotIn("TZ:", text)
+
+    def test_scheduled_hours_match_the_hong_kong_date(self):
+        # 11:10–21:10 HKT is 03:10–13:10 UTC. Hong Kong has no DST, and
+        # those hours are after 00:00 UTC, so the runner date is the
+        # Hong Kong date. Midnight–08:00 HKT is the mismatch window.
+        hong_kong = ZoneInfo("Asia/Hong_Kong")
+        for month, day in ((1, 15), (6, 15)):
+            for hour in (3, 5, 7, 9, 11, 13):
+                instant = datetime(2026, month, day, hour, 10, tzinfo=timezone.utc)
+                local = instant.astimezone(hong_kong)
+                self.assertEqual(instant.date(), local.date())
+                self.assertEqual(local.hour, hour + 8)
+        overnight = datetime(2026, 6, 14, 20, 0, tzinfo=timezone.utc)
+        self.assertEqual(overnight.astimezone(hong_kong).hour, 4)
+        self.assertNotEqual(overnight.date(), overnight.astimezone(hong_kong).date())
 
     def test_readme_explains_daily_and_backfill(self):
         text = (ROOT / "README.md").read_text()
         for phrase in (
-            "13:00 UTC",
+            "11:10, 13:10, 15:10, 17:10, 19:10, and 21:10",
+            "03:10, 05:10, 07:10, 09:10, 11:10, and 13:10 UTC",
+            "10 3,5,7,9,11,13 * * *",
             "Full history",
             "NOTION_ACTIVITIES_DB",
             "NOTION_DAILY_DB",

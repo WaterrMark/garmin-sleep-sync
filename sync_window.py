@@ -1,6 +1,6 @@
-"""Decide whether a run is the daily window or a full history walk.
+"""Decide whether a run is the recent window or a full history walk.
 
-Daily runs stay on a small number of days (SYNC_DAYS, default 3).
+Incremental runs stay on a small number of days (SYNC_DAYS, default 3).
 Full history is opt-in (SYNC_MODE=backfill) and is what the manual
 GitHub Action calls "Full history".
 """
@@ -78,9 +78,10 @@ def incremental_sleep_dates(today, days):
     """Nights to sync, newest first, including today.
 
     Garmin dates a completed night on the morning it ends, the same calendar
-    day Daily Metrics uses for that night's HRV. The scheduled run is in the
-    evening, so today's date is last night's finished sleep. A night with no
-    recorded sleep is still skipped by the caller and does not create a page.
+    day Daily Metrics uses for that night's HRV. The scheduled runs are during
+    the Hong Kong day, on that same calendar date, so today is last night's
+    finished sleep. A night with no recorded sleep is still skipped by the
+    caller and does not create a page.
     """
     return [today - timedelta(days=offset) for offset in range(days)]
 
