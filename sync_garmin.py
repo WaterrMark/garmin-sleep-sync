@@ -1,6 +1,6 @@
 """Sync Garmin sleep, activities, and daily metrics into Notion.
 
-The daily GitHub Action runs this in incremental mode for the last 3 days.
+The scheduled GitHub Action runs this in incremental mode for the last 3 days.
 A manual run can ask for full history, or for just one of the three datasets.
 
     SYNC_MODE     incremental (default) or backfill

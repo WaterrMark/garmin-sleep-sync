@@ -1,8 +1,18 @@
 name: Sync Garmin to Notion
 on:
   schedule:
-    # Daily sync stays on the last 3 days. Full history is a manual run only.
-    - cron: "0 13 * * *"
+    # Same incremental 3-day sync, retried through the Hong Kong day.
+    # Full history stays a manual run. Hong Kong is UTC+8 all year.
+    # :10 past the hour avoids the crowded top-of-hour queue.
+    # 03:10 UTC = 11:10 HKT
+    # 05:10 UTC = 13:10 HKT
+    # 07:10 UTC = 15:10 HKT
+    # 09:10 UTC = 17:10 HKT
+    # 11:10 UTC = 19:10 HKT
+    # 13:10 UTC = 21:10 HKT
+    # ubuntu-latest is UTC. Every slot above is after 00:00 UTC, which is
+    # 08:00 in Hong Kong, so date.today() is already the Hong Kong date.
+    - cron: "10 3,5,7,9,11,13 * * *"
   workflow_dispatch:
     inputs:
       mode:
